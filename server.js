@@ -16,6 +16,9 @@ app.use(cors({
 }));
 app.use(express.json());
 
+// Penting: Railway pakai proxy
+app.set('trust proxy', 1);
+
 // Rate limiting
 const limiter = rateLimit({ windowMs: 60*1000, max: 60, message: { error: 'Terlalu banyak request, coba lagi nanti.' } });
 app.use('/api/', limiter);

@@ -118,7 +118,42 @@ app.get('/api/stream/:videoId', (req, res) => {
     ).toString().trim().split('\n')[0];
 
     if (!audioUrl) return res.status(404).json({ error: 'URL tidak ditemukan' });
-    res.redirect(302, audioUrl);
+
+    // Pipe audio langsung agar tidak kena CORS
+    const https = require('https');
+    const http = require('http');
+    const urlObj = new URL(audioUrl);
+    const client = urlObj.protocol === 'https:' ? https : http;
+
+    const options = {
+      hostname: urlObj.hostname,
+      path: urlObj.pathname + urlObj.search,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Linux; Android 11) AppleWebKit/537.36 Chrome/96.0 Mobile Safari/537.36',
+        'Range': req.headers.range || 'bytes=0-',
+        'Referer': 'https://www.youtube.com/',
+        'Origin': 'https://www.youtube.com'
+      }
+    };
+
+    const proxyReq = client.request(options, (proxyRes) => {
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.setHeader('Content-Type', proxyRes.headers['content-type'] || 'audio/mp4');
+      res.setHeader('Accept-Ranges', 'bytes');
+      if (proxyRes.headers['content-length']) res.setHeader('Content-Length', proxyRes.headers['content-length']);
+      if (proxyRes.headers['content-range']) res.setHeader('Content-Range', proxyRes.headers['content-range']);
+      res.setHeader('Cache-Control', 'no-cache');
+      res.status(proxyRes.statusCode || 200);
+      proxyRes.pipe(res);
+    });
+
+    proxyReq.on('error', (err) => {
+      if (!res.headersSent) res.status(500).json({ error: 'Stream error: ' + err.message });
+    });
+
+    req.on('close', () => proxyReq.destroy());
+    proxyReq.end();
+
   } catch (err) {
     res.status(500).json({ error: 'Gagal stream: ' + err.message });
   }

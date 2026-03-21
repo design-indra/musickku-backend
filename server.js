@@ -106,67 +106,79 @@ app.get('/api/info/:videoId', (req, res) => {
   }
 });
 
-// ── STREAM AUDIO ─────────────────────────────────────────
-app.get('/api/stream/:videoId', (req, res) => {
+// ── GET STREAM URL (untuk direct play di browser) ────────
+app.get('/api/streamurl/:videoId', (req, res) => {
   const { videoId } = req.params;
   if (!isValidVideoId(videoId)) return res.status(400).json({ error: 'Video ID tidak valid' });
 
   try {
-    // Coba format yang didukung Chrome Android: webm opus > mp4 aac > best
-    const audioUrl = execSync(
-      `yt-dlp -f "bestaudio[ext=webm]/bestaudio[ext=mp4]/bestaudio/best" --get-url --no-warnings --no-check-certificates "https://youtube.com/watch?v=${videoId}"`,
+    const output = execSync(
+      `yt-dlp -f "bestaudio[ext=webm]/bestaudio[ext=mp4]/bestaudio" --get-url --no-warnings --no-check-certificates "https://youtube.com/watch?v=${videoId}"`,
       { timeout: 25000 }
     ).toString().trim().split('\n')[0];
 
-    if (!audioUrl) return res.status(404).json({ error: 'URL tidak ditemukan' });
-
-    const https = require('https');
-    const http = require('http');
-    const urlObj = new URL(audioUrl);
-    const client = urlObj.protocol === 'https:' ? https : http;
-
-    const rangeHeader = req.headers.range || '';
-
-    const options = {
-      hostname: urlObj.hostname,
-      path: urlObj.pathname + urlObj.search,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Linux; Android 11; Pixel 5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.45 Mobile Safari/537.36',
-        'Referer': 'https://www.youtube.com/',
-        'Origin': 'https://www.youtube.com',
-        ...(rangeHeader && { 'Range': rangeHeader })
-      }
-    };
-
-    const proxyReq = client.request(options, (proxyRes) => {
-      const contentType = proxyRes.headers['content-type'] || 'audio/webm';
-      
-      const headers = {
-        'Access-Control-Allow-Origin': '*',
-        'Content-Type': contentType,
-        'Accept-Ranges': 'bytes',
-        'Cache-Control': 'no-cache',
-        'X-Content-Type-Options': 'nosniff'
-      };
-      
-      if (proxyRes.headers['content-length']) headers['Content-Length'] = proxyRes.headers['content-length'];
-      if (proxyRes.headers['content-range']) headers['Content-Range'] = proxyRes.headers['content-range'];
-
-      res.writeHead(proxyRes.statusCode || 200, headers);
-      proxyRes.pipe(res);
-    });
-
-    proxyReq.on('error', (err) => {
-      console.error('Stream error:', err.message);
-      if (!res.headersSent) res.status(500).json({ error: 'Stream error: ' + err.message });
-    });
-
-    req.on('close', () => proxyReq.destroy());
-    proxyReq.end();
-
+    if (!output) return res.status(404).json({ error: 'URL tidak ditemukan' });
+    res.json({ url: output, videoId });
   } catch (err) {
-    res.status(500).json({ error: 'Gagal stream: ' + err.message });
+    res.status(500).json({ error: 'Gagal: ' + err.message });
   }
+});
+app.get('/api/stream/:videoId', (req, res) => {
+  const { videoId } = req.params;
+  if (!isValidVideoId(videoId)) return res.status(400).json({ error: 'Video ID tidak valid' });
+
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Content-Type', 'audio/mpeg');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Transfer-Encoding', 'chunked');
+
+  // Stream langsung via yt-dlp + ffmpeg → MP3 → browser
+  // MP3 100% supported di semua browser & Android
+  const ytdlp = spawn('yt-dlp', [
+    '-f', 'bestaudio/best',
+    '--no-warnings',
+    '--no-check-certificates',
+    '-o', '-',  // output ke stdout
+    `https://youtube.com/watch?v=${videoId}`
+  ]);
+
+  const ffmpeg = spawn('ffmpeg', [
+    '-i', 'pipe:0',        // input dari stdin
+    '-f', 'mp3',           // format output MP3
+    '-acodec', 'libmp3lame',
+    '-ab', '128k',         // bitrate 128kbps
+    '-ar', '44100',        // sample rate
+    '-ac', '2',            // stereo
+    'pipe:1'               // output ke stdout
+  ]);
+
+  // Pipe yt-dlp → ffmpeg → response
+  ytdlp.stdout.pipe(ffmpeg.stdin);
+  ffmpeg.stdout.pipe(res);
+
+  ytdlp.stderr.on('data', d => {
+    const msg = d.toString();
+    if (!msg.includes('WARNING') && !msg.includes('[info]')) {
+      // silent
+    }
+  });
+
+  ffmpeg.stderr.on('data', () => {}); // suppress ffmpeg logs
+
+  ytdlp.on('error', err => {
+    console.error('yt-dlp error:', err.message);
+    if (!res.headersSent) res.status(500).json({ error: err.message });
+  });
+
+  ffmpeg.on('error', err => {
+    console.error('ffmpeg error:', err.message);
+    if (!res.headersSent) res.status(500).json({ error: err.message });
+  });
+
+  res.on('close', () => {
+    ytdlp.kill('SIGTERM');
+    ffmpeg.kill('SIGTERM');
+  });
 });
 
 // ── DOWNLOAD MP3 ─────────────────────────────────────────

@@ -112,42 +112,52 @@ app.get('/api/stream/:videoId', (req, res) => {
   if (!isValidVideoId(videoId)) return res.status(400).json({ error: 'Video ID tidak valid' });
 
   try {
+    // Coba format yang didukung Chrome Android: webm opus > mp4 aac > best
     const audioUrl = execSync(
-      `yt-dlp -f "bestaudio[ext=m4a]/bestaudio/best" --get-url --no-warnings --no-check-certificates "https://youtube.com/watch?v=${videoId}"`,
-      { timeout: 20000 }
+      `yt-dlp -f "bestaudio[ext=webm]/bestaudio[ext=mp4]/bestaudio/best" --get-url --no-warnings --no-check-certificates "https://youtube.com/watch?v=${videoId}"`,
+      { timeout: 25000 }
     ).toString().trim().split('\n')[0];
 
     if (!audioUrl) return res.status(404).json({ error: 'URL tidak ditemukan' });
 
-    // Pipe audio langsung agar tidak kena CORS
     const https = require('https');
     const http = require('http');
     const urlObj = new URL(audioUrl);
     const client = urlObj.protocol === 'https:' ? https : http;
 
+    const rangeHeader = req.headers.range || '';
+
     const options = {
       hostname: urlObj.hostname,
       path: urlObj.pathname + urlObj.search,
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Linux; Android 11) AppleWebKit/537.36 Chrome/96.0 Mobile Safari/537.36',
-        'Range': req.headers.range || 'bytes=0-',
+        'User-Agent': 'Mozilla/5.0 (Linux; Android 11; Pixel 5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.45 Mobile Safari/537.36',
         'Referer': 'https://www.youtube.com/',
-        'Origin': 'https://www.youtube.com'
+        'Origin': 'https://www.youtube.com',
+        ...(rangeHeader && { 'Range': rangeHeader })
       }
     };
 
     const proxyReq = client.request(options, (proxyRes) => {
-      res.setHeader('Access-Control-Allow-Origin', '*');
-      res.setHeader('Content-Type', proxyRes.headers['content-type'] || 'audio/mp4');
-      res.setHeader('Accept-Ranges', 'bytes');
-      if (proxyRes.headers['content-length']) res.setHeader('Content-Length', proxyRes.headers['content-length']);
-      if (proxyRes.headers['content-range']) res.setHeader('Content-Range', proxyRes.headers['content-range']);
-      res.setHeader('Cache-Control', 'no-cache');
-      res.status(proxyRes.statusCode || 200);
+      const contentType = proxyRes.headers['content-type'] || 'audio/webm';
+      
+      const headers = {
+        'Access-Control-Allow-Origin': '*',
+        'Content-Type': contentType,
+        'Accept-Ranges': 'bytes',
+        'Cache-Control': 'no-cache',
+        'X-Content-Type-Options': 'nosniff'
+      };
+      
+      if (proxyRes.headers['content-length']) headers['Content-Length'] = proxyRes.headers['content-length'];
+      if (proxyRes.headers['content-range']) headers['Content-Range'] = proxyRes.headers['content-range'];
+
+      res.writeHead(proxyRes.statusCode || 200, headers);
       proxyRes.pipe(res);
     });
 
     proxyReq.on('error', (err) => {
+      console.error('Stream error:', err.message);
       if (!res.headersSent) res.status(500).json({ error: 'Stream error: ' + err.message });
     });
 
